@@ -1,0 +1,99 @@
+#! /usr/bin/python3
+
+"""
+Plugin to monitor the number of mails delivered and rejected by postfix.
+
+Adapted from Perl version by Nicolai Langfeldt contributed to Munin project in
+2003.
+
+This plugin is licensed under the GPLv2.
+
+This plugin uses the systemd journal.
+"""
+
+# TODO: Indicate family=manual
+# TODO: Indicate capabilities=autoconf
+
+from os import environ
+from datetime import datetime, timedelta
+
+import re
+
+import systemd.journal
+
+
+#_statefile = environ['MUNIN_STATEFILE']
+_codes = 450, 504, 554
+
+
+def run(since=None):
+    if since is None:
+        since = datetime.now() - timedelta(minutes=5)
+
+    delivered = 0
+    rejects = {code: 0 for code in _codes}
+
+    with systemd.journal.Reader(flags=systemd.journal.SYSTEM_ONLY) as j:
+        j.this_machine()
+        j.this_boot()  # Right?
+        j.add_match(_SYSTEMD_UNIT='postfix.service')
+        j.seek_realtime(since)
+
+        for entry in j:
+            if re.search(r' to=<[^>]+>, .*, status=sent ', entry['MESSAGE']):
+                delivered += 1
+            elif entry['SYSLOG_IDENTIFIER'] == 'postfix/smtpd':
+                reject = re.search(r'reject:\ \S+\ \S+\ \S+\ (\S+)', entry['MESSAGE'])
+                proxy_reject = re.search(r'proxy-reject:\ \S\ (\S+)', entry['MESSAGE'])
+                match = reject or proxy_reject
+                if match is not None:
+                    rejects[int(match.group(1))] += 1
+            elif entry['SYSLOG_IDENTIFIER'] == 'postfix/cleanup':
+                match = re.match(r'reject: (\S+)', entry['MESSAGE'])
+                if match is not None:
+                    rejects[int(match.group(1))] += 1
+
+    print('delivered.value', delivered)
+    for code, count in rejects.items():
+        print('r{}.value {}'.format(code, count))
+
+
+def autoconf():
+    # TODO?
+    print('yes')
+
+
+def config():
+    print('graph_title Postfix message throughput')
+    print('graph_args --base 1000 -l 0')
+    print('graph_vlabel mails / ${graph_period}')
+    print('graph_scale no')
+    print('graph_total Total')
+    print('graph_category postfix')
+    print('graph_period minute')
+    print('delivered.label delivered')
+    print('delivered.type GAUGE')
+    print('delivered.draw AREA')
+    print('delivered.min 0')
+    for code in _codes:
+        print('r{}.label reject {}'.format(code, code))
+        print('r{}.type GAUGE'.format(code))
+        print('r{}.draw STACK'.format(code))
+        print('r{}.min 0'.format(code))
+
+
+def suggest():
+    raise NotImplementedError()
+
+
+if __name__ == '__main__':
+    from sys import argv
+
+    def notimplemented():
+        raise NotImplementedError()
+
+    {'config': config,
+     'autoconf': autoconf,
+     'snmpconf': notimplemented,
+     'suggest': suggest,
+     'run': run}[argv[1] if len(argv) == 2 else 'run']()
