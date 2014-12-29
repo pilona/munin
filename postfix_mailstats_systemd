@@ -22,24 +22,28 @@ import re
 import systemd.journal
 
 
-#_statefile = environ['MUNIN_STATEFILE']
+_statefile = environ['MUNIN_STATEFILE']
 _codes = 450, 504, 554
 
 
-def run(since=None):
-    if since is None:
-        since = datetime.now() - timedelta(minutes=5)
-
+def run():
     delivered = 0
     rejects = {code: 0 for code in _codes}
 
+    cursor = None
     with systemd.journal.Reader(flags=systemd.journal.SYSTEM_ONLY) as j:
         j.this_machine()
         j.this_boot()  # Right?
         j.add_match(_SYSTEMD_UNIT='postfix.service')
-        j.seek_realtime(since)
+        try:
+            with open(_statefile, 'r') as f:
+                j.seek_cursor(f.readline())
+        except FileNotFoundError:
+            # TODO: Not hardcode 5 minutes. Env var? Can't find one.
+            j.seek_realtime(datetime.now() - timedelta(minutes=5))
 
         for entry in j:
+            cursor = entry['__CURSOR']
             if re.search(r' to=<[^>]+>, .*, status=sent ', entry['MESSAGE']):
                 delivered += 1
             elif entry['SYSLOG_IDENTIFIER'] == 'postfix/smtpd':
@@ -52,6 +56,9 @@ def run(since=None):
                 match = re.match(r'reject: (\S+)', entry['MESSAGE'])
                 if match is not None:
                     rejects[int(match.group(1))] += 1
+    if cursor is not None:
+        with open(_statefile, 'w') as f:
+            f.write(cursor)
 
     print('delivered.value', delivered)
     for code, count in rejects.items():
